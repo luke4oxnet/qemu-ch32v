@@ -304,6 +304,7 @@ typedef struct Ch32TimState {
     /* CNT: updated lazily based on virtual clock */
     uint64_t cnt_base;   /* CNT value at epoch */
     uint64_t epoch_ns;   /* QEMU virtual clock ns at epoch */
+    uint32_t cc_next;    /* first CNT value not yet checked for compare matches */
 
     /*
      * IRQ state: whether we have injected MEIP for this timer.

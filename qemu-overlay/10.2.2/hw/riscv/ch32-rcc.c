@@ -88,6 +88,43 @@ static uint32_t ch32_rcc_pll_mul(uint32_t pllmul)
     return (v <= 14u) ? (v + 2u) : 16u;
 }
 
+/*
+ * PLL multiplier x2 (one setting is x6.5). CH32V307 is a D8C part: PLLMUL 0 is
+ * x18, 1..12 are x3..x14, then x6.5, x15, x16.
+ */
+static uint32_t ch32_rcc_pll_mul_x2(const Ch32MachineState *m, uint32_t pllmul)
+{
+    uint32_t v = pllmul & 0xfu;
+
+    if (m->board && strcmp(m->board->tag, "ch32v307") == 0) {
+        switch (v) {
+        case 0u:
+            return 36u;
+        case 13u:
+            return 13u;
+        case 14u:
+            return 30u;
+        case 15u:
+            return 32u;
+        default:
+            return (v + 2u) * 2u;
+        }
+    }
+    return ch32_rcc_pll_mul(v) * 2u;
+}
+
+/* PLL input when PLLSRC=HSE: HSE / PREDIV1, unless PREDIV1 is fed from PLL2. */
+static uint32_t ch32_rcc_hse_pll_in(const Ch32MachineState *m)
+{
+    uint32_t cfgr2 = m->rcc_shadow.words[0x2c / 4];
+    uint32_t hse_hz = ch32_rcc_hse_hz(m);
+
+    if (cfgr2 & (1u << 16)) {
+        return hse_hz;
+    }
+    return hse_hz / ((cfgr2 & 0xfu) + 1u);
+}
+
 static uint32_t ch32_rcc_calc_sysclk(const Ch32MachineState *m)
 {
     uint32_t cfgr0 = m->rcc_shadow.words[1];   /* 0x04 / 4 = 1 */
@@ -101,8 +138,8 @@ static uint32_t ch32_rcc_calc_sysclk(const Ch32MachineState *m)
     if (sw == 2u) {
         uint32_t pllsrc = (cfgr0 >> 16) & 1u;
         uint32_t pllmul = (cfgr0 >> 18) & 0xfu;
-        uint32_t pll_in = pllsrc ? hse_hz : (hsi_hz / 2u);
-        return pll_in * ch32_rcc_pll_mul(pllmul);
+        uint32_t pll_in = pllsrc ? ch32_rcc_hse_pll_in(m) : (hsi_hz / 2u);
+        return (pll_in * ch32_rcc_pll_mul_x2(m, pllmul)) / 2u;
     }
     /* SW=0 HSI，或 SW=3 保留 */
     return hsi_hz;

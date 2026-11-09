@@ -77,6 +77,8 @@
 
 /* INTFR 位 */
 #define TIM_INTFR_UIF      (1u << 0)   /* 更新中断标志 */
+#define TIM_INTFR_CC1IF    (1u << 1)   /* CCxIF = CC1IF << (channel - 1) */
+#define TIM_INTFR_ALL      0x1Fu       /* UIF and CC1IF..CC4IF; same bits as DMAINTENR */
 
 /* SWEVGR 位 */
 #define TIM_SWEVGR_UG      (1u << 0)   /* 产生更新事件 */
@@ -202,8 +204,7 @@ static void ch32_tim_meip_update(Ch32TimState *t)
     bit = n % 32u;
 
     ienr_on    = (m->pfic_ienr[wd] >> bit) & 1u;
-    uif_active = (t->intfr & TIM_INTFR_UIF) &&
-                 (t->dmaintenr & TIM_DMAINTENR_UIE);
+    uif_active = (t->intfr & t->dmaintenr & TIM_INTFR_ALL) != 0;
 
     BQL_LOCK_GUARD();
     if (!ienr_on || !uif_active) {
@@ -241,17 +242,79 @@ static void ch32_tim_meip_update(Ch32TimState *t)
     riscv_cpu_interrupt(env);
 }
 
+/* CNT position since the epoch, before wrapping at ATRLR. */
+static uint64_t ch32_tim_pos_at(const Ch32TimState *t, uint64_t now_ns)
+{
+    uint32_t hz = ch32_tim_cnt_hz(t);
+
+    if (!(t->ctlr1 & TIM_CTLR1_CEN) || hz == 0 || now_ns <= t->epoch_ns) {
+        return t->cnt_base;
+    }
+    return t->cnt_base + muldiv64(now_ns - t->epoch_ns, hz, 1000000000ull);
+}
+
+static uint16_t ch32_tim_cvr(const Ch32TimState *t, unsigned ch)
+{
+    static const size_t off[4] = {
+        offsetof(Ch32TimState, ch1cvr), offsetof(Ch32TimState, ch2cvr),
+        offsetof(Ch32TimState, ch3cvr), offsetof(Ch32TimState, ch4cvr),
+    };
+
+    return *(const uint16_t *)((const char *)t + off[ch]);
+}
+
+/* Channel ch (0-3) raises a compare event only when configured as an output. */
+static bool ch32_tim_ch_is_output(const Ch32TimState *t, unsigned ch)
+{
+    uint16_t r = (ch < 2u) ? t->chctlr1 : t->chctlr2;
+
+    return ((r >> ((ch & 1u) * 8u)) & 3u) == 0u;
+}
+
+/* Set CCxIF for each output channel whose CVR is in [cc_next, last]. */
+static void ch32_tim_compare_range(Ch32TimState *t, uint32_t last)
+{
+    unsigned ch;
+
+    if (!ch32_tim_is_gptm(t) || t->cc_next > last) {
+        return;
+    }
+    for (ch = 0; ch < 4u; ch++) {
+        uint32_t cvr = ch32_tim_cvr(t, ch);
+
+        if (ch32_tim_ch_is_output(t, ch) && cvr >= t->cc_next && cvr <= last) {
+            t->intfr |= (uint16_t)(TIM_INTFR_CC1IF << ch);
+        }
+    }
+    t->cc_next = last + 1u;
+}
+
+/* Account for compare matches up to now, before CVR or the channel mode change. */
+static void ch32_tim_compare_sync(Ch32TimState *t)
+{
+    uint16_t reload;
+    uint64_t pos;
+
+    if (!ch32_tim_is_gptm(t) || !(t->ctlr1 & TIM_CTLR1_CEN)) {
+        return;
+    }
+    reload = (t->atrlr == 0) ? 0xFFFFu : t->atrlr;
+    pos = ch32_tim_pos_at(t, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    ch32_tim_compare_range(t, (uint32_t)MIN(pos, (uint64_t)reload));
+    ch32_tim_meip_update(t);
+}
+
 /*
- * 调度下一次定时器到期（下一次 UIF 事件）。
- * 在 CEN、PSC、ATRLR 或 CNT 变化时调用。
- * now_ns：当前虚拟时钟；传 0 表示在函数内部读取。
+ * 调度下一次定时器到期（下一次 UIF 或比较事件）。
+ * 在 CEN、PSC、ATRLR、CNT 或 CVR 变化时调用。
  */
 static void ch32_tim_schedule(Ch32TimState *t)
 {
-    uint32_t hz;
-    uint16_t reload, cnt_now;
-    uint32_t ticks_left;
+    uint32_t hz, period;
+    uint16_t reload;
+    uint64_t pos, ticks_left;
     uint64_t delay_ns, now_ns;
+    unsigned ch;
 
     if (!t->timer) {
         return;
@@ -272,33 +335,62 @@ static void ch32_tim_schedule(Ch32TimState *t)
      */
     now_ns    = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     reload = (t->atrlr == 0) ? 0xFFFFu : t->atrlr;
-    cnt_now = ch32_tim_cnt_now_at(t, now_ns);
-    ticks_left = (uint32_t)reload - cnt_now + 1u;
-    if (ticks_left == 0) {
-        ticks_left = (uint32_t)reload + 1u;
+    pos = ch32_tim_pos_at(t, now_ns);
+    period = (uint32_t)reload + 1u;
+    ticks_left = (pos >= period) ? 0 : period - pos;
+    if (ch32_tim_is_gptm(t)) {
+        for (ch = 0; ch < 4u; ch++) {
+            uint32_t cvr = ch32_tim_cvr(t, ch);
+
+            if (ch32_tim_ch_is_output(t, ch) && cvr >= t->cc_next && cvr <= reload) {
+                uint64_t d = (cvr > pos) ? cvr - pos : 0;
+
+                ticks_left = MIN(ticks_left, d);
+            }
+        }
     }
-    delay_ns  = muldiv64(ticks_left, 1000000000ull, hz);
+    /* +1 ns: the callback must see CNT at the target, not one tick short. */
+    delay_ns  = muldiv64(ticks_left, 1000000000ull, hz) + 1u;
     timer_mod_ns(t->timer, now_ns + delay_ns);
 }
 
-/* 定时器回调：在计数器溢出（UIF 事件）时触发。 */
+/* 定时器回调：在计数器溢出（UIF 事件）或比较匹配时触发。 */
 static void ch32_tim_tick(void *opaque)
 {
     Ch32TimState *t = opaque;
+    uint64_t now_ns, pos;
+    uint32_t period;
+    uint16_t reload;
 
     if (!(t->ctlr1 & TIM_CTLR1_CEN)) {
         return;
     }
 
-    /* 将 CNT 历元重置为 0（超过 ATRLR 后计数器回绕到 0） */
-    t->cnt_base  = 0;
-    t->epoch_ns  = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    now_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    reload = (t->atrlr == 0) ? 0xFFFFu : t->atrlr;
+    period = (uint32_t)reload + 1u;
+    pos = ch32_tim_pos_at(t, now_ns);
+
+    if (pos < period) {
+        /* Compare match only: the counter has not wrapped. */
+        ch32_tim_compare_range(t, (uint32_t)pos);
+        ch32_tim_meip_update(t);
+        ch32_tim_schedule(t);
+        return;
+    }
+
+    /* Finish this period's matches, then wrap, keeping any lateness. */
+    ch32_tim_compare_range(t, reload);
+    t->cnt_base = (pos - period) % period;
+    t->epoch_ns = now_ns;
+    t->cc_next  = 0;
+    ch32_tim_compare_range(t, (uint32_t)t->cnt_base);
 
     /* 若未禁止更新则置位 UIF */
     if (!(t->ctlr1 & TIM_CTLR1_UDIS)) {
         t->intfr |= TIM_INTFR_UIF;
-        ch32_tim_meip_update(t);
     }
+    ch32_tim_meip_update(t);
 
     /* 单脉冲模式：首次溢出后停止 */
     if (t->ctlr1 & TIM_CTLR1_OPM) {
@@ -426,6 +518,7 @@ static void ch32_tim_write(void *opaque, hwaddr addr, uint64_t val64,
         if (!was_en && now_en) {
             /* 重新锚定 CNT 历元 */
             t->cnt_base = 0;
+            t->cc_next  = 0;
             t->epoch_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         }
         ch32_tim_schedule(t);
@@ -444,7 +537,7 @@ static void ch32_tim_write(void *opaque, hwaddr addr, uint64_t val64,
     case TIM_OFF_INTFR:
         /* W0C：固件写 0 清除对应标志位 */
         t->intfr &= v16;
-        if (!(t->intfr & TIM_INTFR_UIF)) {
+        if (!(t->intfr & t->dmaintenr & TIM_INTFR_ALL)) {
             t->irq_active = false;
         }
         ch32_tim_meip_update(t);
@@ -453,6 +546,7 @@ static void ch32_tim_write(void *opaque, hwaddr addr, uint64_t val64,
         /* UG：强制更新事件（重载 CNT、锁存预装载、置位 UIF） */
         if (v16 & TIM_SWEVGR_UG) {
             t->cnt_base = 0;
+            t->cc_next  = 0;
             t->epoch_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
             if (t->ctlr1 & TIM_CTLR1_ARPE) {
                 t->atrlr = t->atrlr_preload;
@@ -466,12 +560,16 @@ static void ch32_tim_write(void *opaque, hwaddr addr, uint64_t val64,
         break;
     case TIM_OFF_CHCTLR1:
         if (!ch32_tim_is_bctm(t)) {
+            ch32_tim_compare_sync(t);
             t->chctlr1 = v16;
+            ch32_tim_schedule(t);
         }
         break;
     case TIM_OFF_CHCTLR2:
         if (!ch32_tim_is_bctm(t)) {
+            ch32_tim_compare_sync(t);
             t->chctlr2 = v16;
+            ch32_tim_schedule(t);
         }
         break;
     case TIM_OFF_CCER:
@@ -481,6 +579,7 @@ static void ch32_tim_write(void *opaque, hwaddr addr, uint64_t val64,
         break;
     case TIM_OFF_CNT:
         t->cnt_base = v16;
+        t->cc_next  = v16;
         t->epoch_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         ch32_tim_schedule(t);
         break;
@@ -505,22 +604,30 @@ static void ch32_tim_write(void *opaque, hwaddr addr, uint64_t val64,
         break;
     case TIM_OFF_CH1CVR:
         if (!ch32_tim_is_bctm(t)) {
+            ch32_tim_compare_sync(t);
             t->ch1cvr = v16;
+            ch32_tim_schedule(t);
         }
         break;
     case TIM_OFF_CH2CVR:
         if (!ch32_tim_is_bctm(t)) {
+            ch32_tim_compare_sync(t);
             t->ch2cvr = v16;
+            ch32_tim_schedule(t);
         }
         break;
     case TIM_OFF_CH3CVR:
         if (!ch32_tim_is_bctm(t)) {
+            ch32_tim_compare_sync(t);
             t->ch3cvr = v16;
+            ch32_tim_schedule(t);
         }
         break;
     case TIM_OFF_CH4CVR:
         if (!ch32_tim_is_bctm(t)) {
+            ch32_tim_compare_sync(t);
             t->ch4cvr = v16;
+            ch32_tim_schedule(t);
         }
         break;
     case TIM_OFF_BDTR:
@@ -579,6 +686,7 @@ static void ch32_tim_reset_one(Ch32TimState *t)
     t->dmaadr    = 0;
     t->aux       = 0;  /* GPTM AUX 复位值 0x0000 */
     t->cnt_base  = 0;
+    t->cc_next   = 0;
     t->epoch_ns  = 0;
     t->irq_active = false;
 }
