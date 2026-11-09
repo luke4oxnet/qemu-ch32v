@@ -107,7 +107,7 @@ const Ch32BoardDesc ch32_board_ch32v307 = {
      */
     .default_nic = "ch32-eth-dwmac-10m",
     .hsi_hz = 8000000u,
-    .hse_hz = 8000000u,
+    .hse_hz = 16000000u, /* EthRelax X7 Relays v2 uses a 16 MHz crystal */
 };
 
 const Ch32BoardDesc ch32_board_ch32v305 = {

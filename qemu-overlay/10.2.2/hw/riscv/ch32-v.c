@@ -793,6 +793,18 @@ static void ch32_machine_init(MachineState *machine, const Ch32BoardDesc *bd)
                           "ch32-stk", CH32_STK_SIZE);
     memory_region_add_subregion(sysmem, CH32_STK_BASE, &s->stk_iomem);
 
+    /*
+     * QingKe debug module DATA0/DATA1 (SDI printf). Firmware writes these
+     * without a debugger attached; plain RAM behaves like nobody draining them.
+     */
+    {
+        MemoryRegion *sdi = g_new(MemoryRegion, 1);
+
+        memory_region_init_ram_nomigrate(sdi, OBJECT(machine), "ch32-sdi-data",
+                                         0x10, &error_fatal);
+        memory_region_add_subregion(sysmem, 0xE0000380ULL, sdi);
+    }
+
     {
         g_autofree char *esig_name = g_strdup_printf("%s.esig.rom", bd->tag);
         void *ep;
