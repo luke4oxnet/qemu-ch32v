@@ -8,7 +8,7 @@ FROM debian:trixie-slim AS build
 
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl xz-utils python3-venv libfdt-dev
+      bash ca-certificates curl xz-utils patch python3-venv libfdt-dev
 
 COPY . /src
 WORKDIR /src
