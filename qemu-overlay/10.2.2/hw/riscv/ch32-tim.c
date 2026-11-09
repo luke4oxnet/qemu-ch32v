@@ -223,7 +223,8 @@ static void ch32_tim_meip_update(Ch32TimState *t)
         riscv_cpu_interrupt(env);
         return;
     }
-    if (t->irq_active) {
+    /* Only while we still own MEIP: mret drops the owner without clearing this. */
+    if (t->irq_active && env->wch_evt_mcause_override == n) {
         return;
     }
     /*

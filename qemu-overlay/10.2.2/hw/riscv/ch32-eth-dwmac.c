@@ -396,8 +396,12 @@ void ch32_eth_meip_resync(Ch32MachineState *m)
      * 不重复注入 MEIP。Guest 在 IRQ handler 中 W1C 清 DMASR 后
      * irq_active 会被清除；之后若有新事件（poll timer/BH 设 DMASR），
      * resync 会重新注入 MEIP。
+     *
+     * Only while we still own MEIP: mret drops the owner and MEIP without
+     * touching irq_active, so an event that arrived during the handler would
+     * otherwise never be delivered.
      */
-    if (s->irq_active) {
+    if (s->irq_active && env->wch_evt_mcause_override == n) {
         return;
     }
     /*
