@@ -54,6 +54,7 @@ jobs:
             qemu-system-riscv32-ch32 -M help | grep ch32v307
             command -v mosquitto mosquitto_passwd openssl
             python3 -m pytest --version
+            python3 -c "import paho.mqtt.client as m; m.CallbackAPIVersion.VERSION2"
           '
 
       - name: Publish

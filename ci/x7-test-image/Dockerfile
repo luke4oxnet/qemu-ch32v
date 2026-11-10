@@ -28,6 +28,6 @@ COPY --from=build /runtime-packages.txt /tmp/runtime-packages.txt
 RUN apt-get update -qq \
  && xargs -a /tmp/runtime-packages.txt apt-get install -y --no-install-recommends \
  && apt-get install -y --no-install-recommends \
-      ca-certificates git mosquitto openssl python3 python3-pytest \
+      ca-certificates git mosquitto openssl python3 python3-paho-mqtt python3-pytest \
  && rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt \
  && ln -s /opt/qemu-ch32v/bin/qemu-system-riscv32 /usr/local/bin/qemu-system-riscv32-ch32
