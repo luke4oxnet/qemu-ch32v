@@ -895,8 +895,16 @@ void ch32_stk_pfic_reset(Ch32MachineState *m)
     memset(m->pfic_vtfaddr, 0, sizeof(m->pfic_vtfaddr));
     {
         BQL_LOCK_GUARD();
-        riscv_cpu_update_mip(env, MIP_MTIP | MIP_MSIP, 0);
-        env->mie &= ~(MIP_MTIP | MIP_MSIP);
+        /*
+         * MEIP too: a peripheral interrupt injected just before a guest reset
+         * (ETH under traffic) would otherwise stay asserted. cpu_reset clears
+         * wch_evt_mcause_override afterwards, so the device can no longer
+         * withdraw it, and the new firmware traps with mcause 0x8000000b as
+         * soon as it enables interrupts, before it has set mtvec. A real
+         * system reset clears the PFIC and all pending interrupts.
+         */
+        riscv_cpu_update_mip(env, MIP_MTIP | MIP_MSIP | MIP_MEIP, 0);
+        env->mie &= ~(MIP_MTIP | MIP_MSIP | MIP_MEIP);
         riscv_cpu_interrupt(env);
     }
 }
