@@ -6726,6 +6726,12 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
      */
     [0x804] = { "wch_intsyscr", any, read_wch_intsyscr, write_wch_intsyscr },
     [0xbc0] = { "wch_misc", any, read_zero, write_ignore },
+    /*
+     * CSR 0x7C0 = DEBUG_CR (DBGMCU_CR in the SDK: IWDG_STOP, WWDG_STOP,
+     * TIMx_STOP while the core is halted by a debugger). Firmware writes it
+     * from M-mode; there is no debugger halt here, so ignore it.
+     */
+    [0x7c0] = { "wch_debug_cr", any, read_zero, write_ignore },
 
 #endif /* !CONFIG_USER_ONLY */
 };
