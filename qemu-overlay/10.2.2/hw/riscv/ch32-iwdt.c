@@ -34,7 +34,12 @@
  * 运行后才执行；QEMU 上虚拟时钟与大量 MMIO/TCG 路径下，名义 ~6s 窗口可能偏紧，
  * 表现为反复 guest reset（用户见为「自动重启」）。整体拉长 IWDG 等效周期。
  */
-#define CH32_IWDG_QEMU_TIMEOUT_MULT 24u
+/*
+ * x7-relays-v2 fork: 1 (was 24). The firmware under test feeds from the
+ * start, and its watchdog tests time the real timeout (README 46/48 of
+ * rust-ethrelax); with 24 a /256 x 4096 timeout was 13 minutes.
+ */
+#define CH32_IWDG_QEMU_TIMEOUT_MULT 1u
 
 static uint32_t ch32_iwdt_prescale_div(uint32_t pscr)
 {
@@ -51,7 +56,12 @@ static uint64_t ch32_iwdt_timeout_ns(Ch32MachineState *m)
     uint32_t div = ch32_iwdt_prescale_div(m->iwdt_pscr);
     uint32_t rl = (m->iwdt_rldr & 0xfffu) + 1u;
 
-    return muldiv64(rl, (uint64_t)div * 1000000000ull, CH32_IWDG_LSI_HZ) *
+    /*
+     * x7-relays-v2 fork: muldiv64's multiplier is uint32_t; div * 1e9
+     * overflowed it from /8 up (/256 gave 0.33 s instead of 32.8 s).
+     * rl * div <= 4096 * 256 fits; 1e9 fits.
+     */
+    return muldiv64((uint64_t)rl * div, 1000000000u, CH32_IWDG_LSI_HZ) *
            CH32_IWDG_QEMU_TIMEOUT_MULT;
 }
 
@@ -70,7 +80,9 @@ static void ch32_iwdt_reload_timer(Ch32MachineState *m)
 
 static void ch32_iwdt_fire(void *opaque)
 {
-    (void)opaque;
+    Ch32MachineState *m = opaque;
+
+    m->rst_cause_pending |= CH32_RCC_RSTF_IWDG;
     qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
 }
 
@@ -168,7 +180,12 @@ static void ch32_iwdt_write(void *opaque, hwaddr addr, uint64_t val, unsigned si
         }
         return;
     case 4:
-        if (!m->iwdt_unlock || m->iwdt_enabled) {
+        /*
+         * x7-relays-v2 fork: the chip accepts PSCR/RLDR after 0xCCCC too
+         * (enable, unlock, write, reload is the documented order); the
+         * new values count from the next reload. Was ignored once enabled.
+         */
+        if (!m->iwdt_unlock) {
             return;
         }
         m->iwdt_pscr = v & 7u;
@@ -176,7 +193,7 @@ static void ch32_iwdt_write(void *opaque, hwaddr addr, uint64_t val, unsigned si
         ch32_iwdt_arm_stat_clear(m);
         return;
     case 8:
-        if (!m->iwdt_unlock || m->iwdt_enabled) {
+        if (!m->iwdt_unlock) {
             return;
         }
         m->iwdt_rldr = v & 0xfffu;

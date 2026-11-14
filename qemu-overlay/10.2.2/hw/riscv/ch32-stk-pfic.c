@@ -627,6 +627,7 @@ static void ch32_pfic_write(void *opaque, hwaddr addr, uint64_t val,
     if (addr == 0x048u) {
         if ((v & 0xFFFF0000u) == CH32_PFIC_CFGR_SYSRESET_KEY &&
             (v & CH32_PFIC_CFGR_SYSRESET_BIT)) {
+            m->rst_cause_pending |= CH32_RCC_RSTF_SFT;
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         }
         return;
@@ -729,6 +730,7 @@ static void ch32_pfic_write(void *opaque, hwaddr addr, uint64_t val,
     if (addr == CH32_PFIC_SCTLR_OFF) {
         /* SYSRST(bit31): WO, 系统复位 */
         if (v & CH32_PFIC_SCTLR_SYSRST) {
+            m->rst_cause_pending |= CH32_RCC_RSTF_SFT;
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             return;
         }

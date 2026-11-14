@@ -195,8 +195,9 @@ static uint32_t ch32_rcc_read_reg(Ch32MachineState *m, uint32_t aligned_addr)
         /* BDCTLR：LSERDY 始终就绪 */
         v |= 0x00000002u;
     } else if (aligned_addr == 0x24) {
-        /* RSTSCKR：LSIRDY 始终就绪 */
-        v |= 0x00000002u;
+        /* RSTSCKR：LSIRDY 始终就绪; reset flags kept outside the shadow */
+        v = (v & ~(CH32_RCC_RSTF_MASK | CH32_RCC_RSTSCKR_RMVF)) | 0x00000002u |
+            (m->rcc_rst_flags & CH32_RCC_RSTF_MASK);
     }
 
     return v;
@@ -281,6 +282,14 @@ static void ch32_rcc_write(void *opaque, hwaddr addr, uint64_t val, unsigned siz
         new_val &= ~RCC_RDY_MASK;
     } else if (aligned_addr == 4) {
         new_val &= ~RCC_SWS_MASK;
+    }
+
+    if (aligned_addr == 0x24) {
+        /* RMVF clears the reset flags; flags and RMVF are not stored */
+        if (new_val & CH32_RCC_RSTSCKR_RMVF) {
+            m->rcc_rst_flags = 0;
+        }
+        new_val &= ~(CH32_RCC_RSTF_MASK | CH32_RCC_RSTSCKR_RMVF);
     }
 
     s->words[aligned_addr / 4] = new_val;

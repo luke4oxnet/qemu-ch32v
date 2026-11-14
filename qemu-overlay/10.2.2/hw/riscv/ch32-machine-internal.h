@@ -674,6 +674,15 @@ typedef struct Ch32MachineState {
     uint32_t iwdt_rldr;
     uint32_t iwdt_pscr;
     bool iwdt_enabled;
+    /*
+     * RCC_RSTSCKR reset flags [31:26] (LPWR WWDG IWDG SFT POR PIN). They
+     * live outside rcc_shadow so a guest reset doesn't clear them; only
+     * RMVF (bit 24) does, like the chip. rst_cause_pending is the cause of
+     * the reset in flight (IWDG timeout, PFIC software reset); none means
+     * an external reset (QMP system_reset), counted as the reset pin.
+     */
+    uint32_t rcc_rst_flags;
+    uint32_t rst_cause_pending;
     bool iwdt_unlock;
 
     /*
@@ -711,6 +720,13 @@ typedef struct Ch32MachineState {
 
 extern const MemoryRegionOps ch32_flashreg_ops;
 extern const MemoryRegionOps ch32_rcc_ops;
+#define CH32_RCC_RSTF_PIN   (1u << 26)
+#define CH32_RCC_RSTF_POR   (1u << 27)
+#define CH32_RCC_RSTF_SFT   (1u << 28)
+#define CH32_RCC_RSTF_IWDG  (1u << 29)
+#define CH32_RCC_RSTF_WWDG  (1u << 30)
+#define CH32_RCC_RSTF_MASK  0xfc000000u
+#define CH32_RCC_RSTSCKR_RMVF (1u << 24)
 extern const MemoryRegionOps ch32_stk_ops;
 extern const MemoryRegionOps ch32_pfic_ops;  /* 统一 PFIC IO handler */
 extern const MemoryRegionOps ch32_rtc_ops;

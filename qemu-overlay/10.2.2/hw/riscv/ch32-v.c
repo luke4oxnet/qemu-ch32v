@@ -288,6 +288,10 @@ static void ch32_machine_reset(MachineState *machine, ResetType type)
     /* 重置 IWDG */
     ch32_iwdt_reset(s);
 
+    /* RCC_RSTSCKR reset flags: the cause of this reset, or the reset pin */
+    s->rcc_rst_flags |= s->rst_cause_pending ? s->rst_cause_pending : CH32_RCC_RSTF_PIN;
+    s->rst_cause_pending = 0;
+
     /*
      * 通用软状态复位：RCC/Flash/RNG/CRC/WWDG/PWR/BKP/SDIO/RTC shadow。
      * 与 ch32_machine_init 共享同一段初始化逻辑，避免复制粘贴漂移。
@@ -656,6 +660,10 @@ static void ch32_machine_init(MachineState *machine, const Ch32BoardDesc *bd)
      * 与 ch32_machine_reset 共享同一段代码（ch32_soft_state_reset）。
      */
     ch32_soft_state_reset(s);
+
+    /* power-on: the first machine reset adds the reset pin, like the chip */
+    s->rcc_rst_flags = CH32_RCC_RSTF_POR;
+    s->rst_cause_pending = 0;
 
     /* PFIC / STK 模拟所需的独立软状态（不属于 soft_state_reset） */
     memset(&s->stk, 0, sizeof(s->stk));
